@@ -1,0 +1,43 @@
+services:
+  whistle:
+    build: .
+    image: whistle:latest
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:8000:8000"
+    environment:
+      # Each worker is a process with its own copy of the model (~17 MB), so
+      # raise this to transcribe several requests at once.
+      WHISTLE_WORKERS: "1"
+      WHISTLE_MAX_AUDIO_SECONDS: "3600"
+    restart: unless-stopped
+
+  # `docker compose --profile https up -d`: HTTPS on port 8443 for phones on the
+  # VPN, since browsers only allow the microphone on HTTPS. Set WHISTLE_HOST in
+  # .env to the address the phone opens, e.g. the server's WireGuard IP.
+  https:
+    image: caddy:2.11.6-alpine
+    profiles: [https]
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:8443:443"
+    environment:
+      WHISTLE_HOST: ${WHISTLE_HOST:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on: [whistle]
+    restart: unless-stopped
+
+  # `docker compose --profile tunnel up -d`: reach Whistle through a Cloudflare
+  # Tunnel. Set CLOUDFLARE_TUNNEL_TOKEN in .env and point the tunnel's public
+  # hostname at http://whistle:8000.
+  tunnel:
+    image: cloudflare/cloudflared:2026.9.3
+    profiles: [tunnel]
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on: [whistle]
+    restart: unless-stopped
+
+volumes:
+  caddy-data:

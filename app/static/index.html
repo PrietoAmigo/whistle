@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Whistle</title>
+  <meta name="description" content="Record and transcribe speech with Cactus Whistle.">
+  <meta name="theme-color" content="#f6f5f2" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121214" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Whistle">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="static/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="static/icon-180.png">
+  <link rel="stylesheet" href="static/style.css">
+  <script src="static/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <h1>Whistle</h1>
+    <button id="settings-toggle" class="icon-button" aria-label="Settings" aria-expanded="false" aria-controls="settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+    </button>
+  </header>
+
+  <section id="settings" class="settings" hidden>
+    <label>Language
+      <select id="language">
+        <option value="">Detect automatically</option>
+        <option value="en">English</option>
+        <option value="es">Español</option>
+        <option value="de">Deutsch</option>
+        <option value="fr">Français</option>
+        <option value="it">Italiano</option>
+        <option value="nl">Nederlands</option>
+        <option value="pl">Polski</option>
+      </select>
+    </label>
+    <label>Keywords
+      <input id="keywords" type="text" autocomplete="off" placeholder="Names and terms, comma separated">
+    </label>
+  </section>
+
+  <main>
+    <section class="recorder">
+      <button id="record" class="record" aria-label="Start recording">
+        <span class="level" aria-hidden="true"></span>
+        <svg class="mic" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+        <svg class="stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>
+      </button>
+      <div id="timer" class="timer">0:00</div>
+      <p id="status" class="status" role="status">Tap to record</p>
+      <label class="upload">
+        <input id="upload" type="file" accept="audio/*,video/*">
+        Or upload a recording
+      </label>
+    </section>
+
+    <section id="history" class="history" aria-label="Transcripts"></section>
+  </main>
+
+  <template id="entry-template">
+    <article class="entry">
+      <div class="meta"></div>
+      <p class="text"></p>
+      <div class="actions">
+        <button data-action="copy">Copy</button>
+        <button data-action="share">Share</button>
+        <button data-action="retry">Retry</button>
+        <button data-action="delete" class="quiet">Delete</button>
+      </div>
+    </article>
+  </template>
+</body>
+</html>
