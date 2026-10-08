@@ -31,30 +31,35 @@ class Transcriber:
 
     def transcribe(self, pcm: bytes, language: str | None = None, keywords: list[str] | None = None,
                    word_timestamps: bool = False) -> dict:
-        """Transcribe 16 kHz mono float32 PCM.
+        """Transcribe 16 kHz mono float32 PCM."""
+        *_, (_, result) = self.events(pcm, language, keywords, word_timestamps)
+        return result
+
+    def events(self, pcm: bytes, language: str | None = None, keywords: list[str] | None = None,
+               word_timestamps: bool = False):
+        """Transcribe 16 kHz mono float32 PCM, yielding ("partial", {...}) as it goes, then ("result", {...}).
 
         Clips up to 30 s go through the model in one pass. Longer audio is fed to
-        Whistle's streaming decoder one second at a time, which has no length limit.
+        Whistle's streaming decoder one second at a time, which has no length limit;
+        each second yields the text it committed and how far the decoder has got.
         """
         keywords = keywords or None
+        duration = round(len(pcm) / BYTES_PER_SECOND, 3)
         with self._lock:
             if len(pcm) <= MAX_PASS_SECONDS * BYTES_PER_SECOND:
                 result = self._model.transcribe(pcm, language=language, keywords=keywords,
                                                 word_timestamps=word_timestamps)
             else:
-                result = self._stream(pcm, language, keywords, word_timestamps)
-        result["duration"] = round(len(pcm) / BYTES_PER_SECOND, 3)
-        return result
-
-    def _stream(self, pcm, language, keywords, word_timestamps):
-        chunks = (pcm[i:i + BYTES_PER_SECOND] for i in range(0, len(pcm), BYTES_PER_SECOND))
-        texts, words, detected = [], [], None
-        for step in self._model.stream(chunks, language=language, keywords=keywords):
-            if step["text"]:
-                texts.append(step["text"])
-            words.extend(step["words"])
-            detected = step["language"] or detected
-        result = {"text": " ".join(texts), "language": detected or ""}
-        if word_timestamps:
-            result["words"] = words
-        return result
+                chunks = (pcm[i:i + BYTES_PER_SECOND] for i in range(0, len(pcm), BYTES_PER_SECOND))
+                texts, words, detected = [], [], None
+                for step in self._model.stream(chunks, language=language, keywords=keywords):
+                    if step["text"]:
+                        texts.append(step["text"])
+                    words.extend(step["words"])
+                    detected = step["language"] or detected
+                    yield "partial", {"text": step["text"], "seconds": step["received"], "duration": duration}
+                result = {"text": " ".join(texts), "language": detected or ""}
+                if word_timestamps:
+                    result["words"] = words
+        result["duration"] = duration
+        yield "result", result

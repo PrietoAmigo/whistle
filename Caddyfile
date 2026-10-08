@@ -1,0 +1,14 @@
+# HTTPS in front of Whistle, so phones on the VPN can use the microphone:
+# browsers only allow it on HTTPS. WHISTLE_HOST is the address the phone opens,
+# e.g. the server's WireGuard IP.
+{
+	# There's no public domain to validate, so certificates come from Caddy's own local CA.
+	local_certs
+	skip_install_trust
+	# Browsers send no SNI when they connect to an IP address.
+	default_sni {$WHISTLE_HOST}
+}
+
+https://{$WHISTLE_HOST} {
+	reverse_proxy whistle:8000
+}

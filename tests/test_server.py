@@ -1,5 +1,6 @@
 """HTTP and audio handling, with a stand-in for the native Whistle engine."""
 
+import json
 import math
 import struct
 import sys
@@ -94,6 +95,47 @@ def test_audio_over_30_seconds_is_streamed_one_second_at_a_time(client, tmp_path
     assert body["language"] == "de"
     assert len(body["words"]) == 33
     assert body["duration"] == 32.5
+
+
+def events(response):
+    assert response.headers["content-type"].startswith("text/event-stream")
+    return [json.loads(line[len("data: "):]) for line in response.text.split("\n\n") if line]
+
+
+def test_stream_sends_the_result_of_a_short_clip(client, tmp_path):
+    response = post(client, "/transcribe/stream", write_wav(tmp_path / "clip.wav", 2), keywords="Siobhan")
+    assert response.status_code == 200, response.text
+    [message] = events(response)
+    assert message["result"]["text"] == "turn off the kitchen lights"
+    assert FakeWhistle.calls[0][3] == ["Siobhan"]
+
+
+def test_stream_reports_progress_on_long_audio(client, tmp_path):
+    response = post(client, "/transcribe/stream", write_wav(tmp_path / "long.wav", 31, rate=16000, channels=1))
+    assert response.status_code == 200, response.text
+    *partials, last = events(response)
+    assert [p["partial"]["text"] for p in partials] == [f"w{i}" for i in range(31)] + [""]
+    assert partials[0]["partial"] == {"text": "w0", "seconds": 1, "duration": 31.0}
+    assert last["result"]["text"] == " ".join(f"w{i}" for i in range(31))
+
+
+def test_stream_rejects_bad_input_with_a_status(client, tmp_path):
+    junk = tmp_path / "notes.txt"
+    junk.write_text("not audio")
+    assert post(client, "/transcribe/stream", junk).status_code == 400
+    assert post(client, "/transcribe/stream", write_wav(tmp_path / "clip.wav", 1), language="ja").status_code == 400
+
+
+def test_serves_the_recording_page(client):
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "<title>Whistle</title>" in page.text
+    for asset in ("static/app.js", "static/style.css", "manifest.webmanifest", "static/icon-180.png"):
+        assert f'"{asset}"' in page.text
+        assert client.get("/" + asset).status_code == 200, asset
+    manifest = client.get("/manifest.webmanifest").json()
+    for icon in manifest["icons"]:
+        assert client.get("/" + icon["src"]).status_code == 200, icon["src"]
 
 
 def test_rejects_what_is_not_audio(client, tmp_path):

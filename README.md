@@ -1,6 +1,6 @@
 # whistle
 
-[Cactus Whistle](https://cactuscompute.com/blog/whistle) speech-to-text in a Docker container, with an HTTP API (including an OpenAI-compatible endpoint) and a CLI.
+[Cactus Whistle](https://cactuscompute.com/blog/whistle) speech-to-text in a Docker container, with a recording page for your phone, an HTTP API (including an OpenAI-compatible endpoint) and a CLI.
 
 Whistle is a 16.9 MB speech-to-text model that runs on the CPU, no GPU needed. It handles English, German, French, Spanish, Italian, Dutch and Polish, and can return word timestamps and favour keywords you pass in. It runs on Cactus Compute's [`cactus-needle`](https://pypi.org/project/cactus-needle/) engine. The image downloads the engine and the `whistle.cact` weights from Hugging Face at build time, so the container itself runs offline.
 
@@ -10,16 +10,51 @@ Whistle is a 16.9 MB speech-to-text model that runs on the CPU, no GPU needed. I
 docker compose up -d --build
 ```
 
-or
-
-```sh
-docker build -t whistle .
-docker run -d -p 8000:8000 --name whistle whistle
-```
-
-Then open <http://localhost:8000/docs> to try it from the browser.
+Then open <http://localhost:8000> on the server for the recording page, or <http://localhost:8000/docs> for the API.
 
 The build fetches the engine for the machine's architecture, `linux/amd64` or `linux/arm64` (Apple Silicon, Raspberry Pi with a 64-bit OS), from [Cactus-Compute/needle3](https://huggingface.co/Cactus-Compute/needle3), and the weights from [Cactus-Compute/whistle](https://huggingface.co/Cactus-Compute/whistle).
+
+## Record from your phone over the VPN
+
+Browsers only allow the microphone on HTTPS (or `localhost`). Over the VPN, `http://<server>:8000` lets you upload recordings but not record. The `https` profile adds [Caddy](https://caddyserver.com) on port 8443 with a certificate from its own local CA, which works for a bare WireGuard IP and needs no domain.
+
+1. `cp .env.example .env` and set `WHISTLE_HOST` to the address the phone will open, such as the server's WireGuard IP.
+2. `docker compose --profile https up -d --build`
+3. With the phone on the VPN, open `https://<WHISTLE_HOST>:8443`. The browser warns about the certificate the first time. Tap through it (Advanced → Proceed) and recording works.
+
+To get rid of the warning and add the page to your home screen as an app, trust Caddy's root certificate on the phone:
+
+```sh
+docker compose cp https:/data/caddy/pki/authorities/local/root.crt whistle-root.crt
+```
+
+Copy `whistle-root.crt` to the phone, then:
+
+- **Android**: Settings → Security → More security settings → Encryption & credentials → Install a certificate → CA certificate.
+- **iPhone**: open the file, install it under Settings → Profile Downloaded, then turn it on in Settings → General → About → Certificate Trust Settings.
+
+Anyone holding that CA's key can issue certificates the phone will trust, so keep the `caddy-data` volume private.
+
+There's no login, so anyone who can reach the ports can use Whistle. Docker's published ports bypass ufw and firewalld, so on a server with a public IP, set `BIND_ADDRESS` in `.env` to the WireGuard IP to listen on the VPN only.
+
+### The recording page
+
+- Tap the button to record and tap again to stop. A ring follows your voice, so you can see the microphone is picking you up, and the screen stays on while recording.
+- Long recordings show the transcript building up second by second.
+- Transcripts are kept in the phone's browser, with copy, share and delete. A failed upload keeps its audio, so you can retry it.
+- Settings (the sliders icon) let you force a language or add keywords such as names; both are remembered.
+- "Upload a recording" transcribes an existing file, and works over plain HTTP too.
+
+### Cloudflare Tunnel (optional)
+
+To reach it from outside the VPN instead:
+
+1. In Cloudflare Zero Trust, go to Networks → Tunnels, create a tunnel, and copy its token into `CLOUDFLARE_TUNNEL_TOKEN` in `.env`.
+2. Give the tunnel a public hostname whose service is `http://whistle:8000`.
+3. `docker compose --profile tunnel up -d --build`
+4. Put the hostname behind Cloudflare Access (Access → Applications → Self-hosted, allowing only your email). Otherwise the whole internet can use it.
+
+Cloudflare provides the HTTPS, so recording works without the `https` profile. Its free plan limits uploads to 100 MB. The page streams progress while it transcribes, so long recordings don't run into Cloudflare's 100-second response timeout.
 
 ## HTTP API
 
@@ -54,6 +89,10 @@ curl http://localhost:8000/transcribe \
 ```
 
 Silence and steady noise return an empty `text` and `language`.
+
+### `POST /transcribe/stream`
+
+This takes the same fields as `/transcribe` and answers with server-sent events. While audio longer than 30 s is transcribed, it sends a `{"partial": {"text", "seconds", "duration"}}` event each second, then `{"result": {...}}` with the same object `/transcribe` returns. If the engine fails part way, the last event is `{"error": "..."}` instead. The recording page uses this endpoint.
 
 ### `POST /v1/audio/transcriptions` (OpenAI compatible)
 
@@ -94,6 +133,7 @@ docker run --rm -v "$PWD:/data" whistle transcribe /data/clip.mp3 --json
 | Variable | Default | |
 | --- | --- | --- |
 | `PORT` | `8000` | Port the API listens on inside the container |
+| `BIND_ADDRESS` | `0.0.0.0` | Host address compose publishes ports 8000 and 8443 on; set in `.env` |
 | `WHISTLE_WORKERS` | `1` | Server processes. Each loads its own copy of the model (~17 MB) and handles one transcription at a time |
 | `WHISTLE_MAX_AUDIO_SECONDS` | `3600` | Longer uploads are rejected with `413`; `0` removes the limit |
 | `NEEDLE_TELEMETRY`, `DO_NOT_TRACK` | `0`, `1` | `cactus-needle` sends anonymous usage counts by default. The image turns this off; set `NEEDLE_TELEMETRY=1` and `DO_NOT_TRACK=` to turn it back on |
