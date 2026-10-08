@@ -169,3 +169,15 @@ main { max-width: 40rem; margin: 0 auto; padding: 0 16px 32px; }
 }
 .entry .actions button.quiet { margin-left: auto; border-color: transparent; color: var(--muted); }
 .entry .actions button[hidden] { display: none; }
+
+.more {
+  display: block;
+  margin: 16px auto 0;
+  padding: 8px 18px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.more[hidden] { display: none; }

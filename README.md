@@ -1,6 +1,6 @@
 # whistle
 
-[Cactus Whistle](https://cactuscompute.com/blog/whistle) speech-to-text in a Docker container, with a recording page for your phone, an HTTP API (including an OpenAI-compatible endpoint) and a CLI.
+[Cactus Whistle](https://cactuscompute.com/blog/whistle) speech-to-text in a Docker container, with a recording page for your phone, an HTTP API (including an OpenAI-compatible endpoint) and a CLI. Every transcript is stored on the server along with the time its audio was recorded.
 
 Whistle is a 16.9 MB speech-to-text model that runs on the CPU, no GPU needed. It handles English, German, French, Spanish, Italian, Dutch and Polish, and can return word timestamps and favour keywords you pass in. It runs on Cactus Compute's [`cactus-needle`](https://pypi.org/project/cactus-needle/) engine. The image downloads the engine and the `whistle.cact` weights from Hugging Face at build time, so the container itself runs offline.
 
@@ -41,7 +41,7 @@ There's no login, so anyone who can reach the ports can use Whistle. Docker's pu
 
 - Tap the button to record and tap again to stop. A ring follows your voice, so you can see the microphone is picking you up, and the screen stays on while recording.
 - Long recordings show the transcript building up second by second.
-- Transcripts are kept in the phone's browser, with copy, share and delete. A failed upload keeps its audio, so you can retry it.
+- Transcripts are [stored on the server](#stored-transcripts) and listed newest first, each with the date and time it was recorded, in the phone's time zone. They appear on any device that opens the page. Copy, share and delete work on each one, and a failed upload keeps its audio, so you can retry it.
 - Settings (the sliders icon) let you force a language or add keywords such as names; both are remembered.
 - "Upload a recording" transcribes an existing file, and works over plain HTTP too.
 
@@ -76,9 +76,14 @@ curl http://localhost:8000/transcribe \
 | `language` | `en`, `de`, `fr`, `es`, `it`, `nl` or `pl`; detected when omitted |
 | `keywords` | Comma-separated names and product words to favour |
 | `word_timestamps` | `true` to add each word with its `start`, `end` and `probability` |
+| `recorded_at` | When the audio was recorded, ISO 8601 (`2026-10-08T22:10:03Z`, or with an offset such as `+02:00`); defaults to now |
+
+The transcript is stored, and the response is the stored record:
 
 ```json
 {
+  "id": 42,
+  "recorded_at": "2026-10-08T22:10:03Z",
   "text": "turn off the kitchen lights",
   "language": "en",
   "ttft_ms": 11.1,
@@ -112,6 +117,27 @@ with open("clip.wav", "rb") as audio:
 
 `response_format` can be `json` (the default), `text` or `verbose_json`. `verbose_json` with `timestamp_granularities[]=word` adds word timestamps. `prompt` is used as comma-separated keywords. `model` and `temperature` are accepted and ignored.
 
+### Stored transcripts
+
+Every transcription, from any endpoint, is saved to a SQLite database at `/data/whistle.db`, on the `whistle-data` volume in compose. Each one gets an `id` and a `recorded_at` time in UTC, to the second:
+
+- For recordings made on the page, that's when you tapped record.
+- For uploaded files, it's the file's last-modified time.
+- For API calls, it's the `recorded_at` you send, or the time of the request.
+
+| | |
+| --- | --- |
+| `GET /transcripts?limit=100&offset=0` | Stored transcripts, the most recently recorded first |
+| `GET /transcripts/{id}` | One transcript |
+| `DELETE /transcripts/{id}` | Delete one |
+
+```sh
+curl http://localhost:8000/transcripts?limit=1
+# [{"id": 42, "recorded_at": "2026-10-08T22:10:03Z", "text": "turn off the kitchen lights", "language": "en", "duration": 2.4}]
+```
+
+`words` is included when the transcript was made with word timestamps. To back up the database, copy it out with `docker compose cp whistle:/data/whistle.db .`. If you mount a host folder at `/data` instead of the volume, it must be writable by the container's user, uid 10001 (`sudo chown 10001 <folder>`).
+
 ### `GET /health`
 
 Returns `{"status": "ok", "model": "whistle.cact"}`. The image's Docker `HEALTHCHECK` calls this endpoint.
@@ -121,12 +147,12 @@ Returns `{"status": "ok", "model": "whistle.cact"}`. The image's Docker `HEALTHC
 Mount a folder and transcribe files without starting the server:
 
 ```sh
-docker run --rm -v "$PWD:/data" whistle transcribe /data/meeting.m4a
-docker run --rm -v "$PWD:/data" whistle transcribe /data/*.wav --language de --word-timestamps
-docker run --rm -v "$PWD:/data" whistle transcribe /data/clip.mp3 --json
+docker run --rm -v "$PWD:/audio" whistle transcribe /audio/meeting.m4a
+docker run --rm -v "$PWD:/audio" whistle transcribe /audio/one.wav /audio/two.wav --language de --word-timestamps
+docker run --rm -v "$PWD:/audio" whistle transcribe /audio/clip.mp3 --json
 ```
 
-`--keywords "Siobhan, Krzysztof"` favours names, and `--json` prints the full result as one JSON object per file.
+`--keywords "Siobhan, Krzysztof"` favours names, and `--json` prints the full result as one JSON object per file. The CLI prints transcripts and doesn't store them.
 
 ## Configuration
 
@@ -136,6 +162,7 @@ docker run --rm -v "$PWD:/data" whistle transcribe /data/clip.mp3 --json
 | `BIND_ADDRESS` | `0.0.0.0` | Host address compose publishes ports 8000 and 8443 on; set in `.env` |
 | `WHISTLE_WORKERS` | `1` | Server processes. Each loads its own copy of the model (~17 MB) and handles one transcription at a time |
 | `WHISTLE_MAX_AUDIO_SECONDS` | `3600` | Longer uploads are rejected with `413`; `0` removes the limit |
+| `WHISTLE_DB` | `/data/whistle.db` | The transcripts database |
 | `NEEDLE_TELEMETRY`, `DO_NOT_TRACK` | `0`, `1` | `cactus-needle` sends anonymous usage counts by default. The image turns this off; set `NEEDLE_TELEMETRY=1` and `DO_NOT_TRACK=` to turn it back on |
 
 ## Notes
@@ -153,4 +180,11 @@ pytest
 
 The tests replace the native engine with a stand-in, so they need only `ffmpeg` on the `PATH`, not the model.
 
-Whistle and the needle engine are made by [Cactus Compute](https://cactuscompute.com). `cactus-needle` is Apache-2.0, and the weights' terms are on the [model card](https://huggingface.co/Cactus-Compute/whistle).
+## License
+
+This repository's own code is MIT (see [LICENSE](LICENSE)). It contains no code or weights from [Cactus Compute](https://cactuscompute.com), who make Whistle; the image downloads those when it's built, and they come under their own terms:
+
+- `cactus-needle`, the Python package, is Apache-2.0 ([cactus-compute/needle](https://github.com/cactus-compute/needle)).
+- The native engine comes from [Cactus-Compute/needle3](https://huggingface.co/Cactus-Compute/needle3) and the weights from [Cactus-Compute/whistle](https://huggingface.co/Cactus-Compute/whistle). Their licenses are on those Hugging Face pages.
+
+Check those terms before you publish the built image or use it commercially.
