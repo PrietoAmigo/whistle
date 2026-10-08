@@ -1,9 +1,8 @@
 "use strict";
 
-const HISTORY_KEY = "whistle.history";
 const LANGUAGE_KEY = "whistle.language";
 const KEYWORDS_KEY = "whistle.keywords";
-const MAX_SAVED = 100;
+const PAGE_SIZE = 50;
 
 const $ = (id) => document.getElementById(id);
 const recordEl = $("record");
@@ -11,13 +10,15 @@ const timerEl = $("timer");
 const statusEl = $("status");
 const uploadEl = $("upload");
 const historyEl = $("history");
+const moreEl = $("more");
 const languageEl = $("language");
 const keywordsEl = $("keywords");
 const settingsEl = $("settings");
 const settingsToggle = $("settings-toggle");
 const template = $("entry-template");
 
-// Storage can be unavailable (private browsing, blocked site data); the page works without it.
+// Settings are remembered in the browser. Storage can be unavailable (private browsing, blocked
+// site data); the page works without it.
 const store = {
   get(key, fallback) {
     try {
@@ -34,13 +35,13 @@ const store = {
   },
 };
 
-// Finished transcripts are kept in this browser. Ones in flight, or failed with their audio
-// kept for a retry, live in memory.
-let saved = store.get(HISTORY_KEY, []);
+// Finished transcripts are stored on the server, with the time their audio was recorded, the most
+// recent first. Ones in flight, or failed with their audio kept for a retry, live in memory.
+let saved = [];
 const live = [];
 
 const clock = (seconds) => `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
-const newId = () => (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+const newId = () => `live-${crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`}`;
 
 function setStatus(text, isError = false) {
   statusEl.textContent = text;
@@ -53,7 +54,11 @@ function languageName(code) {
 
 function meta(entry) {
   if (entry.state) return entry.status;
-  const when = new Date(entry.at).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const recorded = new Date(entry.recorded_at);
+  const thisYear = recorded.getFullYear() === new Date().getFullYear();
+  const when = recorded.toLocaleString([], {
+    year: thisYear ? undefined : "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  });
   const parts = [when, clock(entry.duration)];
   parts.push(entry.text ? languageName(entry.language) : "no speech");
   return parts.join(" · ");
@@ -65,6 +70,7 @@ function entryNode(entry) {
   node.classList.toggle("pending", entry.state === "pending");
   node.classList.toggle("failed", entry.state === "failed");
   node.querySelector(".meta").textContent = meta(entry);
+  if (!entry.state) node.querySelector(".meta").title = new Date(entry.recorded_at).toLocaleString();
   node.querySelector(".text").textContent = entry.text;
   const show = (action, visible) => (node.querySelector(`[data-action="${action}"]`).hidden = !visible);
   const done = !entry.state && Boolean(entry.text);
@@ -93,6 +99,7 @@ async function transcribe(entry) {
   form.append("file", entry.blob, entry.name);
   if (languageEl.value) form.append("language", languageEl.value);
   if (keywordsEl.value.trim()) form.append("keywords", keywordsEl.value);
+  form.append("recorded_at", entry.recordedAt);
 
   const response = await fetch("transcribe/stream", { method: "POST", body: form });
   if (!response.ok) {
@@ -133,19 +140,54 @@ async function run(entry) {
   try {
     const result = await transcribe(entry);
     live.splice(live.indexOf(entry), 1);
-    saved.unshift({ id: entry.id, at: entry.at, text: result.text, language: result.language, duration: result.duration });
-    saved = saved.slice(0, MAX_SAVED);
-    store.set(HISTORY_KEY, saved);
+    // The list is always the newest transcripts, so "Show older" can carry on from its length. An
+    // upload older than everything listed waits there while there's more to load.
+    const index = saved.findIndex((e) => e.recorded_at <= result.recorded_at);
+    if (index >= 0) saved.splice(index, 0, result);
+    else if (moreEl.hidden) saved.push(result);
+    else setStatus("Saved. It's older than the transcripts shown, so it's under Show older.");
   } catch (error) {
     Object.assign(entry, { state: "failed", status: errorMessage(error) });
   }
   render();
 }
 
-function enqueue(blob, name) {
-  const entry = { id: newId(), at: new Date().toISOString(), blob, name };
+function enqueue(blob, name, recordedAt) {
+  const entry = { id: newId(), recordedAt: new Date(recordedAt).toISOString(), blob, name };
   live.unshift(entry);
   run(entry);
+}
+
+async function remove(entry) {
+  if (live.includes(entry)) {
+    live.splice(live.indexOf(entry), 1);
+  } else {
+    try {
+      const response = await fetch(`transcripts/${entry.id}`, { method: "DELETE" });
+      if (!response.ok && response.status !== 404) throw new Error(`The server answered ${response.status}`);
+    } catch (error) {
+      setStatus(`Couldn't delete the transcript: ${errorMessage(error)}`, true);
+      return;
+    }
+    saved = saved.filter((e) => e !== entry);
+  }
+  render();
+}
+
+async function loadMore() {
+  moreEl.disabled = true;
+  try {
+    const response = await fetch(`transcripts?limit=${PAGE_SIZE}&offset=${saved.length}`);
+    if (!response.ok) throw new Error(`The server answered ${response.status}`);
+    const page = await response.json();
+    saved.push(...page.filter((t) => !saved.some((e) => e.id === t.id)));
+    moreEl.hidden = page.length < PAGE_SIZE;
+  } catch (error) {
+    setStatus(`Couldn't load past transcripts: ${errorMessage(error)}`, true);
+  } finally {
+    moreEl.disabled = false;
+  }
+  render();
 }
 
 async function copy(text, button) {
@@ -166,7 +208,7 @@ historyEl.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
   const id = button.closest(".entry").dataset.id;
-  const entry = live.find((e) => e.id === id) || saved.find((e) => e.id === id);
+  const entry = live.find((e) => e.id === id) || saved.find((e) => String(e.id) === id);
   if (!entry) return;
   switch (button.dataset.action) {
     case "copy":
@@ -179,11 +221,7 @@ historyEl.addEventListener("click", (event) => {
       run(entry);
       break;
     case "delete":
-      if (!confirm("Delete this transcript?")) return;
-      if (live.includes(entry)) live.splice(live.indexOf(entry), 1);
-      saved = saved.filter((e) => e !== entry);
-      store.set(HISTORY_KEY, saved);
-      render();
+      if (confirm("Delete this transcript?")) remove(entry);
       break;
   }
 });
@@ -245,11 +283,11 @@ async function start() {
   });
   recorder.addEventListener("stop", () => {
     const type = recorder.mimeType || mimeType || "audio/webm";
-    enqueue(new Blob(chunks, { type }), `recording.${extension(type)}`);
+    enqueue(new Blob(chunks, { type }), `recording.${extension(type)}`, started);
   });
   recorder.start(1000);
-
   const started = Date.now();
+
   const tick = () => (timerEl.textContent = clock((Date.now() - started) / 1000));
   session = { recorder, stream, timer: setInterval(tick, 250), meter: meter(stream), wakeLock: null };
   tick();
@@ -274,10 +312,12 @@ function stop() {
 }
 
 recordEl.addEventListener("click", () => (session ? stop() : start()));
+moreEl.addEventListener("click", loadMore);
 
 uploadEl.addEventListener("change", () => {
   const [file] = uploadEl.files;
-  if (file) enqueue(file, file.name);
+  // A file's last change is the best guess at when it was recorded.
+  if (file) enqueue(file, file.name, file.lastModified || Date.now());
   uploadEl.value = "";
 });
 
@@ -301,4 +341,4 @@ if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || !window.
     : "Browsers only allow the microphone over HTTPS, so open this page's https:// address to record. Uploading a recording works here too.");
 }
 
-render();
+loadMore();

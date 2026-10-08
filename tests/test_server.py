@@ -6,11 +6,13 @@ import struct
 import sys
 import types
 import wave
+from datetime import datetime, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import cli, server
+from app.storage import timestamp
 from app.transcriber import BYTES_PER_SECOND
 
 
@@ -45,7 +47,8 @@ def fake_engine(monkeypatch):
 
 
 @pytest.fixture
-def client():
+def client(tmp_path, monkeypatch):
+    monkeypatch.setenv("WHISTLE_DB", str(tmp_path / "data" / "whistle.db"))
     with TestClient(server.app) as client:
         yield client
 
@@ -190,3 +193,69 @@ def test_cli_reports_files_it_cannot_read(tmp_path, capsys):
     captured = capsys.readouterr()
     assert "missing.wav" in captured.err
     assert '"file":' in captured.out
+
+
+def test_timestamps_are_stored_as_utc_to_the_second():
+    assert timestamp("2026-10-08T23:10:03+01:00") == "2026-10-08T22:10:03Z"
+    assert timestamp("2026-10-08T22:10:03.456Z") == "2026-10-08T22:10:03Z"
+    assert timestamp("2026-10-08T22:10:03") == "2026-10-08T22:10:03Z"
+    now = datetime.fromisoformat(timestamp())
+    assert abs((datetime.now(timezone.utc) - now).total_seconds()) < 5
+    with pytest.raises(ValueError):
+        timestamp("yesterday")
+
+
+def test_transcripts_are_stored_with_when_they_were_recorded(client, tmp_path):
+    clip = write_wav(tmp_path / "clip.wav", 1)
+    first = post(client, "/transcribe", clip, recorded_at="2026-10-08T23:10:03.456+01:00",
+                 word_timestamps="true").json()
+    assert first["recorded_at"] == "2026-10-08T22:10:03Z"
+    assert first["text"] == "turn off the kitchen lights"
+    unstamped = post(client, "/transcribe", clip).json()
+    assert abs((datetime.now(timezone.utc) - datetime.fromisoformat(unstamped["recorded_at"])).total_seconds()) < 5
+    older = post(client, "/transcribe", clip, recorded_at="2025-01-01T09:00:00Z").json()
+
+    listed = client.get("/transcripts").json()
+    assert [t["id"] for t in listed] == [unstamped["id"], first["id"], older["id"]]
+    assert listed[1] == {"id": first["id"], "recorded_at": "2026-10-08T22:10:03Z",
+                         "text": "turn off the kitchen lights", "language": "en", "duration": 1.0,
+                         "words": [{"word": "turn", "start": 0.1, "end": 0.3, "probability": 0.98}]}
+    assert "words" not in listed[0]
+    assert [t["id"] for t in client.get("/transcripts?limit=1&offset=1").json()] == [first["id"]]
+    assert client.get(f"/transcripts/{first['id']}").json() == listed[1]
+
+
+def test_transcripts_can_be_deleted(client, tmp_path):
+    stored = post(client, "/transcribe", write_wav(tmp_path / "clip.wav", 1)).json()
+    assert client.delete(f"/transcripts/{stored['id']}").status_code == 204
+    assert client.get(f"/transcripts/{stored['id']}").status_code == 404
+    assert client.delete(f"/transcripts/{stored['id']}").status_code == 404
+    assert client.get("/transcripts").json() == []
+
+
+def test_rejects_a_recorded_at_that_is_not_a_time(client, tmp_path):
+    clip = write_wav(tmp_path / "clip.wav", 1)
+    for url in ("/transcribe", "/transcribe/stream"):
+        response = post(client, url, clip, recorded_at="yesterday")
+        assert response.status_code == 400
+        assert "ISO 8601" in response.json()["detail"]
+    assert FakeWhistle.calls == []
+
+
+def test_the_stream_and_openai_endpoints_store_too(client, tmp_path):
+    clip = write_wav(tmp_path / "clip.wav", 1)
+    [message] = events(post(client, "/transcribe/stream", clip, recorded_at="2026-10-08T22:10:03Z"))
+    assert message["result"]["recorded_at"] == "2026-10-08T22:10:03Z"
+    post(client, "/v1/audio/transcriptions", clip)
+    listed = client.get("/transcripts").json()
+    assert len(listed) == 2
+    assert message["result"]["id"] in [t["id"] for t in listed]
+
+
+def test_transcripts_survive_a_restart(tmp_path, monkeypatch):
+    monkeypatch.setenv("WHISTLE_DB", str(tmp_path / "whistle.db"))
+    clip = write_wav(tmp_path / "clip.wav", 1)
+    with TestClient(server.app) as client:
+        stored = post(client, "/transcribe", clip).json()
+    with TestClient(server.app) as client:
+        assert client.get("/transcripts").json()[0]["id"] == stored["id"]

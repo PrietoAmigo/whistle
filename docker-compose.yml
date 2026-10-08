@@ -9,6 +9,9 @@ services:
       # raise this to transcribe several requests at once.
       WHISTLE_WORKERS: "1"
       WHISTLE_MAX_AUDIO_SECONDS: "3600"
+    volumes:
+      # The transcripts database.
+      - whistle-data:/data
     restart: unless-stopped
 
   # `docker compose --profile https up -d`: HTTPS on port 8443 for phones on the
@@ -40,4 +43,5 @@ services:
     restart: unless-stopped
 
 volumes:
+  whistle-data:
   caddy-data:

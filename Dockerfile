@@ -35,9 +35,12 @@ COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 ENV NEEDLE3_LIB_PATH=/opt/whistle/libneedle.so \
     NEEDLE_WHISTLE_WEIGHTS=/opt/whistle/whistle.cact \
     HF_HUB_OFFLINE=1 \
-    PORT=8000
+    PORT=8000 \
+    WHISTLE_DB=/data/whistle.db
 
-RUN useradd --system --create-home --uid 10001 whistle
+# Transcripts are stored in /data: mount a volume there to keep them.
+RUN useradd --system --create-home --uid 10001 whistle \
+    && mkdir /data && chown whistle /data
 USER whistle
 
 EXPOSE 8000
